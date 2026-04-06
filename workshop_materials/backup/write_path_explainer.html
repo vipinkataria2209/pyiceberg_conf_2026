@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>PyIceberg Write Path — Deep Dive</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #22263a; --border: #2e3250;
+    --teal: #00c9b1; --blue: #4f8ef7; --purple: #a78bfa; --orange: #f97316;
+    --green: #22c55e; --red: #f87171; --yellow: #fbbf24; --pink: #ec4899;
+    --text: #e2e8f0; --muted: #8892a4; --code-bg: #141720;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; line-height: 1.7; padding: 32px 20px; }
+  .container { max-width: 1040px; margin: 0 auto; }
+
+  /* Hero */
+  .hero { text-align: center; padding: 52px 20px 44px; background: linear-gradient(135deg,#0f1117,#1a1d27,#0f1117); border: 1px solid var(--border); border-radius: 16px; margin-bottom: 36px; position: relative; overflow: hidden; }
+  .hero::before { content:''; position:absolute; inset:0; background:radial-gradient(ellipse at 50% 0%, rgba(0,201,177,.08) 0%, transparent 70%); pointer-events:none; }
+  .hero h1 { font-size: 2.2rem; font-weight: 800; background: linear-gradient(135deg, var(--teal), var(--blue)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; margin-bottom:10px; }
+  .hero p { color:var(--muted); font-size:1rem; max-width:580px; margin:0 auto; }
+  .badge { display:inline-block; background:rgba(0,201,177,.1); border:1px solid rgba(0,201,177,.3); color:var(--teal); border-radius:20px; padding:4px 14px; font-size:.75rem; font-weight:700; margin-bottom:16px; letter-spacing:.05em; text-transform:uppercase; }
+
+  /* Tabs */
+  .tab-bar { display:flex; gap:4px; margin-bottom:0; border-bottom:2px solid var(--border); }
+  .tab-btn {
+    padding: 12px 28px; border:none; background:transparent; color:var(--muted);
+    font-size:.92rem; font-weight:600; cursor:pointer; border-radius:8px 8px 0 0;
+    border-bottom:2px solid transparent; margin-bottom:-2px; transition:all .2s;
+    display:flex; align-items:center; gap:8px;
+  }
+  .tab-btn:hover { color:var(--text); background:var(--surface); }
+  .tab-btn.active { color:var(--text); border-bottom-color:var(--teal); background:var(--surface); }
+  .tab-btn.active .tab-dot { background:var(--teal); }
+  .tab-dot { width:8px; height:8px; border-radius:50%; background:var(--border); transition:background .2s; }
+  .tab-btn.t4b .tab-dot  { --active-col: var(--blue); }
+  .tab-btn.t4c .tab-dot  { --active-col: var(--orange); }
+  .tab-btn.t4b.active .tab-dot  { background:var(--blue); }
+  .tab-btn.t4c.active .tab-dot  { background:var(--orange); }
+
+  .tab-content { display:none; padding-top:32px; }
+  .tab-content.active { display:block; }
+
+  /* Headings */
+  h2 { font-size:1.4rem; font-weight:700; color:var(--teal); margin-bottom:18px; display:flex; align-items:center; gap:10px; }
+  h2.blue  { color:var(--blue); }
+  h2.orange{ color:var(--orange); }
+  h3 { font-size:1rem; font-weight:600; color:var(--blue); margin-bottom:8px; }
+
+  /* Cards */
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:26px; margin-bottom:22px; }
+  .card-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:14px; margin-bottom:28px; }
+  .comp { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px; transition:border-color .2s,transform .2s; }
+  .comp:hover { border-color:var(--teal); transform:translateY(-2px); }
+  .comp .label { font-size:.7rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin-bottom:5px; }
+  .comp .name  { font-family:monospace; font-size:.98rem; font-weight:700; margin-bottom:3px; }
+  .comp .file  { font-family:monospace; font-size:.72rem; color:var(--muted); margin-bottom:8px; }
+  .comp p      { font-size:.86rem; color:var(--muted); line-height:1.6; }
+  .c-teal   { border-left:3px solid var(--teal);   } .c-teal .name   { color:var(--teal); }
+  .c-blue   { border-left:3px solid var(--blue);   } .c-blue .name   { color:var(--blue); }
+  .c-purple { border-left:3px solid var(--purple); } .c-purple .name { color:var(--purple); }
+  .c-orange { border-left:3px solid var(--orange); } .c-orange .name { color:var(--orange); }
+  .c-green  { border-left:3px solid var(--green);  } .c-green .name  { color:var(--green); }
+  .c-yellow { border-left:3px solid var(--yellow); } .c-yellow .name { color:var(--yellow); }
+  .c-pink   { border-left:3px solid var(--pink);   } .c-pink .name   { color:var(--pink); }
+
+  /* Stages */
+  .stages { display:flex; flex-direction:column; }
+  .stage  { display:flex; gap:18px; align-items:flex-start; position:relative; }
+  .stage:not(:last-child)::after { content:''; position:absolute; left:21px; top:44px; bottom:-24px; width:2px; background:var(--border); }
+  .stage-num { width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:.9rem; flex-shrink:0; position:relative; z-index:1; }
+  .stage-body { flex:1; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px 20px; margin-bottom:24px; }
+  .stage-body h3 { margin-bottom:5px; }
+  .stage-body p  { font-size:.88rem; color:var(--muted); margin-bottom:8px; }
+  .sbadge { display:inline-block; font-size:.7rem; font-weight:700; padding:3px 10px; border-radius:20px; margin-bottom:8px; text-transform:uppercase; letter-spacing:.05em; }
+  .b-mem  { background:rgba(167,139,250,.15); color:var(--purple); border:1px solid rgba(167,139,250,.3); }
+  .b-s3   { background:rgba(249,115,22,.15);  color:var(--orange); border:1px solid rgba(249,115,22,.3); }
+  .b-http { background:rgba(34,197,94,.15);   color:var(--green);  border:1px solid rgba(34,197,94,.3); }
+  .b-scan { background:rgba(79,142,247,.15);  color:var(--blue);   border:1px solid rgba(79,142,247,.3); }
+
+  .s1 .stage-num,.s2 .stage-num { background:rgba(167,139,250,.2); color:var(--purple); border:2px solid var(--purple); }
+  .s3 .stage-num,.s4 .stage-num,.s5 .stage-num { background:rgba(249,115,22,.2); color:var(--orange); border:2px solid var(--orange); }
+  .s6 .stage-num { background:rgba(34,197,94,.2); color:var(--green); border:2px solid var(--green); }
+  .s3 .stage-body,.s4 .stage-body,.s5 .stage-body { border-color:rgba(249,115,22,.3); }
+  .s6 .stage-body { border-color:rgba(34,197,94,.4); }
+  .sp .stage-num  { background:rgba(79,142,247,.2); color:var(--blue); border:2px solid var(--blue); }
+  .sp .stage-body { border-color:rgba(79,142,247,.3); }
+  .so .stage-num  { background:rgba(236,72,153,.2); color:var(--pink); border:2px solid var(--pink); }
+  .so .stage-body { border-color:rgba(236,72,153,.3); }
+
+  /* Code */
+  code { font-family:'Fira Code',monospace; font-size:.84em; background:var(--code-bg); border:1px solid var(--border); padding:2px 6px; border-radius:4px; color:var(--teal); }
+  pre  { background:var(--code-bg); border:1px solid var(--border); border-radius:10px; padding:18px; overflow-x:auto; font-family:'Fira Code',monospace; font-size:.83rem; line-height:1.7; margin-top:10px; }
+  .kw{color:var(--purple)} .fn{color:var(--blue)} .str{color:var(--green)} .cm{color:#4a5568;font-style:italic} .nm{color:var(--orange)}
+
+  /* DataFile fields */
+  .fgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px; margin-top:12px; }
+  .fi { background:var(--code-bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
+  .fi .fn2 { font-family:monospace; font-size:.8rem; color:var(--teal); font-weight:600; margin-bottom:3px; }
+  .fi .ft  { font-size:.72rem; color:var(--purple); font-family:monospace; margin-bottom:3px; }
+  .fi .fd  { font-size:.76rem; color:var(--muted); }
+
+  /* S3 layout */
+  .s3box { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+  .s3f { background:rgba(249,115,22,.08); border:1px solid rgba(249,115,22,.25); border-radius:8px; padding:10px 14px; font-size:.8rem; }
+  .s3f .s3n { color:var(--orange); font-weight:800; font-size:1.05rem; }
+  .s3f .s3l { color:var(--text); font-weight:600; }
+  .s3f .s3e { color:var(--muted); font-size:.73rem; }
+
+  /* Callouts */
+  .callout { border-radius:8px; padding:14px 18px; margin-top:12px; font-size:.86rem; display:flex; gap:10px; }
+  .co-warn { background:rgba(251,191,36,.08); border:1px solid rgba(251,191,36,.25); }
+  .co-info { background:rgba(79,142,247,.08); border:1px solid rgba(79,142,247,.25); }
+  .co-good { background:rgba(34,197,94,.08);  border:1px solid rgba(34,197,94,.25); }
+  .co-red  { background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25); }
+  .co-icon { font-size:1rem; margin-top:2px; flex-shrink:0; }
+  .co-text { color:var(--muted); } .co-text strong { color:var(--text); }
+
+  /* Flow */
+  .flow { display:flex; align-items:center; flex-wrap:wrap; margin:16px 0; justify-content:center; gap:0; }
+  .fb { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:10px 14px; text-align:center; min-width:100px; }
+  .fb .fbi { font-size:1.3rem; margin-bottom:3px; }
+  .fb .fbn { font-size:.75rem; font-weight:700; color:var(--text); }
+  .fb .fbf { font-size:.65rem; color:var(--muted); font-family:monospace; margin-top:2px; }
+  .farr { color:var(--teal); font-size:1.2rem; padding:0 5px; }
+
+  /* Compare table */
+  .compare { width:100%; border-collapse:collapse; font-size:.87rem; margin-top:14px; }
+  .compare th { background:var(--surface2); color:var(--muted); text-transform:uppercase; font-size:.7rem; letter-spacing:.06em; padding:10px 14px; text-align:left; border-bottom:1px solid var(--border); }
+  .compare td { padding:10px 14px; border-bottom:1px solid rgba(46,50,80,.5); vertical-align:top; }
+  .compare tr:last-child td { border-bottom:none; }
+  .compare .aspect { color:var(--text); font-weight:600; }
+  .compare .v-append { color:var(--teal); }
+  .compare .v-part   { color:var(--blue); }
+  .compare .v-over   { color:var(--orange); }
+
+  /* ACID */
+  .acid-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; margin-top:12px; }
+  .ai { background:var(--code-bg); border:1px solid var(--border); border-radius:8px; padding:14px; }
+  .ai .al { font-size:1.3rem; font-weight:800; color:var(--teal); margin-bottom:3px; }
+  .ai .aw { font-size:.75rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:5px; }
+  .ai p  { font-size:.83rem; color:var(--muted); }
+
+  .divider { height:1px; background:var(--border); margin:32px 0; }
+
+  footer { text-align:center; color:var(--muted); font-size:.78rem; margin-top:50px; padding-top:18px; border-top:1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Hero -->
+  <div class="hero">
+    <div class="badge">PyIceberg Summit 2026</div>
+    <h1>The Write Path — Deep Dive</h1>
+    <p>Everything inside <code style="background:none;border:none;color:#00c9b1;font-size:.95rem;">table.append()</code>, <code style="background:none;border:none;color:#4f8ef7;font-size:.95rem;">partitioned append</code>, and <code style="background:none;border:none;color:#f97316;font-size:.95rem;">overwrite()</code> — from DataFrame to atomic S3 commit.</p>
+  </div>
+
+  <!-- Tab Bar -->
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('t4',this)">
+      <span class="tab-dot"></span> 4 — Append
+    </button>
+    <button class="tab-btn t4b" onclick="switchTab('t4b',this)">
+      <span class="tab-dot"></span> 4b — Partitioned Append
+    </button>
+    <button class="tab-btn t4c" onclick="switchTab('t4c',this)">
+      <span class="tab-dot"></span> 4c — Overwrite
+    </button>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ TAB 4 -->
+  <div id="t4" class="tab-content active">
+
+    <h2><span>🗺️</span> The Big Picture</h2>
+    <div class="card">
+      <p style="color:var(--muted);margin-bottom:18px;">One call to <code>table.append(batch)</code> triggers a precise 6-stage pipeline. Stages 1–2 are pure in-memory Python. Stages 3–5 write 3 files to S3. Stage 6 is the atomic HTTP gate that makes it all visible.</p>
+      <div class="flow">
+        <div class="fb"><div class="fbi">📦</div><div class="fbn">DataFrame</div><div class="fbf">PyArrow Table</div></div>
+        <div class="farr">→</div>
+        <div class="fb"><div class="fbi">🗂️</div><div class="fbn">Parquet File</div><div class="fbf">io/pyarrow.py</div></div>
+        <div class="farr">→</div>
+        <div class="fb"><div class="fbi">📋</div><div class="fbn">Manifest</div><div class="fbf">manifest.py</div></div>
+        <div class="farr">→</div>
+        <div class="fb"><div class="fbi">📸</div><div class="fbn">Snapshot</div><div class="fbf">table/snapshots.py</div></div>
+        <div class="farr">→</div>
+        <div class="fb"><div class="fbi">🔒</div><div class="fbn">Catalog Commit</div><div class="fbf">catalog/</div></div>
+      </div>
+      <div class="s3box">
+        <div class="s3f"><div class="s3n">3</div><div class="s3l">S3 writes</div><div class="s3e">per append call</div></div>
+        <div class="s3f"><div class="s3n">1</div><div class="s3l">Atomic HTTP commit</div><div class="s3e">the visibility gate</div></div>
+        <div class="s3f"><div class="s3n">0</div><div class="s3l">Partial reads possible</div><div class="s3e">old snapshot or new — never half</div></div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <h2><span>🧩</span> Key Components</h2>
+    <div class="card-grid">
+      <div class="comp c-teal">
+        <div class="label">Orchestrator</div><div class="name">Transaction</div><div class="file">table/__init__.py</div>
+        <p>Top-level coordinator. Created implicitly by <code>table.append()</code>. Accumulates <code>TableUpdate</code> and <code>TableRequirement</code> objects and drives the commit. Nothing hits the network until <code>commit_transaction()</code>.</p>
+      </div>
+      <div class="comp c-blue">
+        <div class="label">Snapshot Producer</div><div class="name">_FastAppendFiles</div><div class="file">table/update/snapshot.py</div>
+        <p>"Fast" because it reuses existing manifests from the parent snapshot — only writes a new manifest for new files, never a full rewrite. Collects <code>DataFile</code> objects via <code>append_data_file()</code>.</p>
+      </div>
+      <div class="comp c-orange">
+        <div class="label">Parquet Writer</div><div class="name">write_parquet()</div><div class="file">io/pyarrow.py</div>
+        <p>Converts the PyArrow Table to Parquet and streams it to S3 via <code>PyArrowFileIO</code>. Also computes per-column min/max/null stats and packages them into a <code>DataFile</code>.</p>
+      </div>
+      <div class="comp c-purple">
+        <div class="label">Data File Descriptor</div><div class="name">DataFile</div><div class="file">manifest.py</div>
+        <p>Represents one physical Parquet file. Contains S3 path, record count, file size, partition value, and column-level statistics used for file pruning at read time.</p>
+      </div>
+      <div class="comp c-yellow">
+        <div class="label">Metadata Index Entry</div><div class="name">ManifestEntry</div><div class="file">manifest.py</div>
+        <p>Wraps a <code>DataFile</code> with: <code>status</code> (ADDED / EXISTING / DELETED), <code>snapshot_id</code>, <code>sequence_number</code>, and <code>file_sequence_number</code>.</p>
+      </div>
+      <div class="comp c-green">
+        <div class="label">Optimistic Lock</div><div class="name">AssertRefSnapshotId</div><div class="file">table/update/__init__.py</div>
+        <p>Sent with every commit — "only accept this if the current snapshot is still X." Two racing writers: exactly one wins; the other gets <code>CommitFailedException</code>.</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <h2><span>⚙️</span> The 6 Stages in Detail</h2>
+    <div class="stages">
+
+      <div class="stage s1">
+        <div class="stage-num">1</div>
+        <div class="stage-body">
+          <div class="sbadge b-mem">In Memory — No Network</div>
+          <h3>Transaction Opens</h3>
+          <p><code>table.append(batch)</code> creates a <code>Transaction</code> and initializes a <code>_FastAppendFiles</code> snapshot producer. Pure Python object creation — nothing written anywhere yet.</p>
+          <pre><code><span class="cm"># Internally triggered by table.append(batch)</span>
+tx = Transaction(table)
+fast_append = tx.<span class="fn">_fast_append_files</span>()  <span class="cm"># _FastAppendFiles init</span></code></pre>
+        </div>
+      </div>
+
+      <div class="stage s2">
+        <div class="stage-num">2</div>
+        <div class="stage-body">
+          <div class="sbadge b-mem">In Memory — No Network</div>
+          <h3>Schema Validation</h3>
+          <p><code>_check_pyarrow_schema_compatible()</code> confirms every Arrow column maps to a valid Iceberg field. Type mismatches fail fast — before any data is written to S3.</p>
+          <pre><code><span class="cm"># Arrow dtype  →  Iceberg type</span>
+string         →  StringType()
+timestamp[us]  →  TimestampType()
+double         →  DoubleType()
+<span class="cm"># Mismatch → raises ValueError immediately, no S3 writes</span></code></pre>
+        </div>
+      </div>
+
+      <div class="stage s3">
+        <div class="stage-num">3</div>
+        <div class="stage-body">
+          <div class="sbadge b-s3">S3 Write #1 — Parquet Data File</div>
+          <h3>DataFrame → Parquet → S3</h3>
+          <p><code>bin_pack_arrow_table()</code> splits the table into write tasks. Each task goes to <code>write_parquet()</code> which streams to S3 and returns a <code>DataFile</code> with full column stats.</p>
+          <pre><code>data/00000-0-<span class="nm">550e8400-e29b-41d4-a716</span>.parquet</code></pre>
+          <div class="divider" style="margin:14px 0;"></div>
+          <h3 style="color:var(--purple)">DataFile Fields</h3>
+          <div class="fgrid">
+            <div class="fi"><div class="fn2">file_path</div><div class="ft">str</div><div class="fd">Full S3 URI of the Parquet file</div></div>
+            <div class="fi"><div class="fn2">record_count</div><div class="ft">int</div><div class="fd">Number of rows in this file</div></div>
+            <div class="fi"><div class="fn2">file_size_in_bytes</div><div class="ft">int</div><div class="fd">Physical size on S3</div></div>
+            <div class="fi"><div class="fn2">lower_bounds</div><div class="ft">dict[int, bytes]</div><div class="fd">Min value per column — used for file pruning</div></div>
+            <div class="fi"><div class="fn2">upper_bounds</div><div class="ft">dict[int, bytes]</div><div class="fd">Max value per column — used for file pruning</div></div>
+            <div class="fi"><div class="fn2">null_value_counts</div><div class="ft">dict[int, int]</div><div class="fd">Null count per column</div></div>
+            <div class="fi"><div class="fn2">column_sizes</div><div class="ft">dict[int, int]</div><div class="fd">Disk size per column</div></div>
+            <div class="fi"><div class="fn2">partition</div><div class="ft">Record</div><div class="fd">Partition value (e.g. sensor_id=PICARRO-001)</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stage s4">
+        <div class="stage-num">4</div>
+        <div class="stage-body">
+          <div class="sbadge b-s3">S3 Write #2 — Manifest File (.avro)</div>
+          <h3>Manifest File Written</h3>
+          <p>The <code>DataFile</code> is wrapped in a <code>ManifestEntry</code> (<code>status=ADDED</code>) and written as Avro via <code>ManifestWriterV2</code>. This is the file index — future reads use it to skip files entirely.</p>
+          <pre><code>metadata/<span class="nm">uuid</span>-m0.avro
+
+status          = ADDED
+snapshot_id     = <span class="nm">2985870393</span>
+sequence_number = 1
+data_file       = DataFile(…)</code></pre>
+          <div class="callout co-info"><div class="co-icon">💡</div><div class="co-text"><strong>Why Avro?</strong> Manifest files use Avro because Iceberg's metadata schema is rich and nested — handles evolving schemas far better than JSON at scale.</div></div>
+        </div>
+      </div>
+
+      <div class="stage s5">
+        <div class="stage-num">5</div>
+        <div class="stage-body">
+          <div class="sbadge b-s3">S3 Write #3 — Manifest List + Snapshot</div>
+          <h3>Manifest List &amp; Snapshot Created</h3>
+          <p>The manifest list (<code>snap-*.avro</code>) is the table of contents — it lists every manifest file. The <code>Snapshot</code> object is built in memory referencing it. Still not visible to readers.</p>
+          <pre><code>metadata/snap-<span class="nm">2985870393</span>-1-<span class="nm">uuid</span>.avro
+
+snapshot_id   = <span class="nm">2985870393</span>
+parent_id     = <span class="nm">null</span>     <span class="cm">← first append</span>
+operation     = <span class="str">"append"</span>
+summary       = {<span class="str">added-data-files</span>: <span class="nm">1</span>, <span class="str">added-records</span>: <span class="nm">50</span>}</code></pre>
+          <div class="callout co-warn"><div class="co-icon">⚠️</div><div class="co-text"><strong>Not visible yet.</strong> All 3 files are on S3 — but no reader sees them until Stage 6 updates the catalog.</div></div>
+        </div>
+      </div>
+
+      <div class="stage s6">
+        <div class="stage-num">6</div>
+        <div class="stage-body">
+          <div class="sbadge b-http">HTTP POST — Atomic Catalog Commit</div>
+          <h3>Atomic Catalog Commit — The Gate</h3>
+          <p>Single HTTP POST with <code>AddSnapshotUpdate</code> + <code>AssertRefSnapshotId</code>. The catalog validates atomically — accepts or rejects the entire commit.</p>
+          <pre><code>POST /v1/namespaces/pyiceberg_demo/tables/sensor_readings/commit
+{
+  <span class="str">"requirements"</span>: [{ <span class="str">"type"</span>: <span class="str">"assert-ref-snapshot-id"</span>, <span class="str">"snapshot-id"</span>: <span class="nm">null</span> }],
+  <span class="str">"updates"</span>:      [{ <span class="str">"action"</span>: <span class="str">"add-snapshot"</span>, … },
+                   { <span class="str">"action"</span>: <span class="str">"set-snapshot-ref"</span>, <span class="str">"ref-name"</span>: <span class="str">"main"</span> }]
+}</code></pre>
+          <div class="callout co-good"><div class="co-icon">✅</div><div class="co-text"><strong>200 OK:</strong> snapshot is live — all readers now see 50 rows.</div></div>
+          <div class="callout co-red" style="margin-top:8px;"><div class="co-icon">❌</div><div class="co-text"><strong>409 Conflict:</strong> another writer committed first. PyIceberg raises <code>CommitFailedException</code>. Call <code>table.refresh()</code> and retry — PyIceberg does <strong>not</strong> auto-retry.</div></div>
+        </div>
+      </div>
+
+    </div><!-- /stages -->
+
+    <div class="divider"></div>
+    <h2><span>🪣</span> What Lands on S3 After 3 Appends</h2>
+    <div class="card">
+      <pre><code>warehouse/pyiceberg_demo/sensor_readings/
+├── data/
+│   ├── 00000-0-<span class="nm">uuid1</span>.parquet   <span class="cm">← batch 1 · 50 rows</span>
+│   ├── 00000-0-<span class="nm">uuid2</span>.parquet   <span class="cm">← batch 2 · 50 rows</span>
+│   └── 00000-0-<span class="nm">uuid3</span>.parquet   <span class="cm">← batch 3 · 50 rows</span>
+└── metadata/
+    ├── 00000-<span class="nm">uuid</span>.metadata.json   <span class="cm">← table created (empty)</span>
+    ├── 00001-<span class="nm">uuid</span>.metadata.json   <span class="cm">← after batch 1</span>
+    ├── 00002-<span class="nm">uuid</span>.metadata.json   <span class="cm">← after batch 2</span>
+    ├── 00003-<span class="nm">uuid</span>.metadata.json   <span class="cm">← after batch 3</span>
+    ├── <span class="nm">uuid1</span>-m0.avro             <span class="cm">← manifest · batch 1 (1 entry)</span>
+    ├── <span class="nm">uuid2</span>-m0.avro             <span class="cm">← manifest · batch 2 (1 entry)</span>
+    ├── <span class="nm">uuid3</span>-m0.avro             <span class="cm">← manifest · batch 3 (1 entry)</span>
+    ├── snap-<span class="nm">snap1</span>-1-<span class="nm">uuid</span>.avro   <span class="cm">← manifest list · snapshot 1</span>
+    ├── snap-<span class="nm">snap2</span>-1-<span class="nm">uuid</span>.avro   <span class="cm">← manifest list · snapshot 2</span>
+    └── snap-<span class="nm">snap3</span>-1-<span class="nm">uuid</span>.avro   <span class="cm">← manifest list · snapshot 3</span>
+<span class="cm">Total: 3 parquet + 4 metadata.json + 3 manifests + 3 manifest lists = 13 files</span></code></pre>
+    </div>
+
+    <div class="divider"></div>
+    <h2><span>🔐</span> ACID Guarantees</h2>
+    <div class="card">
+      <div class="acid-grid">
+        <div class="ai"><div class="al">A</div><div class="aw">Atomicity</div><p>The catalog commit is a single HTTP POST — all or nothing. If it fails, S3 files exist but are invisible (orphans).</p></div>
+        <div class="ai"><div class="al">C</div><div class="aw">Consistency</div><p><code>AssertRefSnapshotId</code> ensures the table state at commit matches what the writer read. Schema requirements validate field IDs are unchanged.</p></div>
+        <div class="ai"><div class="al">I</div><div class="aw">Isolation</div><p>Readers always scan a consistent snapshot. A writer mid-flight is invisible — readers see old or new, never in-between.</p></div>
+        <div class="ai"><div class="al">D</div><div class="aw">Durability</div><p>Once the catalog confirms, the snapshot is durable. Metadata JSON on S3 is the source of truth — survives restarts.</p></div>
+      </div>
+    </div>
+
+  </div><!-- /tab t4 -->
+
+
+  <!-- ═══════════════════════════════════════════════ TAB 4b -->
+  <div id="t4b" class="tab-content">
+
+    <h2 class="blue"><span>🗂️</span> Partitioned Append — The Big Picture</h2>
+    <div class="card">
+      <p style="color:var(--muted);margin-bottom:16px;">Partitioning adds one extra step before Stage 3: <code>bin_pack_arrow_table()</code> groups rows by partition value and generates <strong>one Parquet file per distinct value</strong>. Everything else — manifest, snapshot, catalog commit — is identical to a plain append.</p>
+      <div class="callout co-info"><div class="co-icon">💡</div><div class="co-text"><strong>Key insight:</strong> The partition spec lives in the <strong>table metadata</strong>, not in the Parquet files. Iceberg knows where data lives without opening a single file — partition pruning is 100% metadata-driven.</div></div>
+    </div>
+
+    <div class="divider"></div>
+    <h2 class="blue"><span>🧩</span> Partition-Specific Components</h2>
+    <div class="card-grid">
+      <div class="comp c-blue">
+        <div class="label">Partition Definition</div><div class="name">PartitionSpec</div><div class="file">partitioning.py</div>
+        <p>Defines which fields to partition on and which transform to apply. Stored permanently in table metadata. The <code>field_id=1000</code> is the spec's own ID — separate from the source field ID.</p>
+        <pre style="margin-top:10px;font-size:.78rem;"><code>PartitionSpec(
+  PartitionField(
+    source_id=<span class="nm">1</span>,          <span class="cm"># sensor_id field</span>
+    field_id=<span class="nm">1000</span>,
+    transform=IdentityTransform(),
+    name=<span class="str">"sensor_id"</span>
+  )
+)</code></pre>
+      </div>
+      <div class="comp c-purple">
+        <div class="label">Row Binner</div><div class="name">bin_pack_arrow_table()</div><div class="file">io/pyarrow.py</div>
+        <p>Groups rows of the PyArrow Table by their partition value before any file is written. Each group becomes a separate <code>WriteTask</code>. For 150 rows across 5 sensor IDs → 5 write tasks → 5 Parquet files.</p>
+      </div>
+      <div class="comp c-yellow">
+        <div class="label">Path Strategy</div><div class="name">LocationProvider</div><div class="file">table/locations.py</div>
+        <p>Generates the S3 path for each partition file. The default <code>SimpleLocationProvider</code> creates <code>{data_path}/{partition_path}/{filename}</code>, producing the familiar <code>sensor_id=PICARRO-001/</code> folder structure.</p>
+      </div>
+      <div class="comp c-green">
+        <div class="label">Read-time Pruner</div><div class="name">_ManifestEvalVisitor</div><div class="file">expressions/</div>
+        <p>At read time, checks each file's recorded <code>partition_value</code> in the manifest. A query <code>WHERE sensor_id = 'PICARRO-003'</code> opens exactly 1 file out of 5 — without reading any Parquet at all.</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <h2 class="blue"><span>⚙️</span> Write Path Stages (Partitioned)</h2>
+    <div class="stages">
+
+      <div class="stage s1">
+        <div class="stage-num">1</div>
+        <div class="stage-body">
+          <div class="sbadge b-mem">In Memory — No Network</div>
+          <h3>Transaction + Schema Validation</h3>
+          <p>Same as plain append — <code>Transaction</code> opens, <code>_FastAppendFiles</code> initialises, schema is validated. No network.</p>
+        </div>
+      </div>
+
+      <div class="stage sp">
+        <div class="stage-num">★</div>
+        <div class="stage-body">
+          <div class="sbadge b-scan">Extra Step — Partition Binning</div>
+          <h3>bin_pack_arrow_table() — Row Grouping</h3>
+          <p>This step does <strong>not exist</strong> in a plain append. The 150-row table is scanned and split into groups by <code>sensor_id</code> value — producing 5 <code>WriteTask</code> objects, one per distinct PICARRO ID.</p>
+          <pre><code>all_batches (150 rows, 5 sensor_ids)
+  → WriteTask(sensor_id=PICARRO-001, ~30 rows)
+  → WriteTask(sensor_id=PICARRO-002, ~30 rows)
+  → WriteTask(sensor_id=PICARRO-003, ~30 rows)
+  → WriteTask(sensor_id=PICARRO-004, ~30 rows)
+  → WriteTask(sensor_id=PICARRO-005, ~30 rows)</code></pre>
+        </div>
+      </div>
+
+      <div class="stage s3">
+        <div class="stage-num">3</div>
+        <div class="stage-body">
+          <div class="sbadge b-s3">S3 Write #1–5 — 5 Parquet Files</div>
+          <h3>5 Parquet Files Written in Parallel</h3>
+          <p>Each <code>WriteTask</code> becomes a separate <code>write_parquet()</code> call. Files land in partition-specific S3 folders. Each returns its own <code>DataFile</code> with the <code>partition_value</code> field set.</p>
+          <pre><code>data/sensor_id=PICARRO-001/00000-0-<span class="nm">uuid1</span>.parquet
+data/sensor_id=PICARRO-002/00000-0-<span class="nm">uuid2</span>.parquet
+data/sensor_id=PICARRO-003/00000-0-<span class="nm">uuid3</span>.parquet
+data/sensor_id=PICARRO-004/00000-0-<span class="nm">uuid4</span>.parquet
+data/sensor_id=PICARRO-005/00000-0-<span class="nm">uuid5</span>.parquet</code></pre>
+          <div class="callout co-warn"><div class="co-icon">⚠️</div><div class="co-text"><strong>Folder names are a side effect.</strong> The partition metadata lives in the manifest — not the folder name. Iceberg does not rely on the path to determine partition value.</div></div>
+        </div>
+      </div>
+
+      <div class="stage s4">
+        <div class="stage-num">4</div>
+        <div class="stage-body">
+          <div class="sbadge b-s3">S3 Write #6 — Manifest File (5 Entries)</div>
+          <h3>One Manifest — 5 Entries</h3>
+          <p>All 5 <code>DataFile</code> objects are wrapped in <code>ManifestEntry</code> records (<code>status=ADDED</code>) and written to a single Avro manifest. Compare: plain append had 1 entry per manifest.</p>
+          <pre><code>metadata/<span class="nm">uuid</span>-m0.avro  →  5 ManifestEntry records
+  entry[0]: DataFile(PICARRO-001, partition_value={sensor_id:PICARRO-001})
+  entry[1]: DataFile(PICARRO-002, partition_value={sensor_id:PICARRO-002})
+  …</code></pre>
+        </div>
+      </div>
+
+      <div class="stage s5">
+        <div class="stage-num">5</div>
+        <div class="stage-body">
+          <div class="sbadge b-s3">S3 Write #7 — Manifest List</div>
+          <h3>Manifest List + Snapshot</h3>
+          <p>Same as plain append — one <code>snap-*.avro</code> pointing to the single manifest. The snapshot summary now reports <code>added-data-files: 5</code>.</p>
+        </div>
+      </div>
+
+      <div class="stage s6">
+        <div class="stage-num">6</div>
+        <div class="stage-body">
+          <div class="sbadge b-http">HTTP POST — Atomic Catalog Commit</div>
+          <h3>Same Atomic Gate</h3>
+          <p>Identical to plain append — <code>AddSnapshotUpdate + AssertRefSnapshotId</code>. Concurrency control works exactly the same way regardless of partitioning.</p>
+          <div class="callout co-good"><div class="co-icon">✅</div><div class="co-text"><strong>Result:</strong> 5 Parquet files committed in a single atomic snapshot. Any reader sees all 5 files or none.</div></div>
+        </div>
+      </div>
+
+    </div><!-- /stages -->
+
+    <div class="divider"></div>
+    <h2 class="blue"><span>⚡</span> Read-time Benefit — Partition Pruning</h2>
+    <div class="card">
+      <p style="color:var(--muted);margin-bottom:14px;">The real payoff of partitioning shows up at read time. Here's what happens for a filtered scan:</p>
+      <pre><code><span class="cm"># Query: only PICARRO-003 rows</span>
+table.scan(row_filter=EqualTo(<span class="str">"sensor_id"</span>, <span class="str">"PICARRO-003"</span>)).to_arrow()
+
+<span class="cm"># What PyIceberg does:</span>
+1. Load manifest list (snap-*.avro)
+2. For each ManifestEntry, check partition_value vs filter
+   → PICARRO-001: <span class="nm">SKIP</span>  (partition_value != PICARRO-003)
+   → PICARRO-002: <span class="nm">SKIP</span>
+   → PICARRO-003: <span class="nm">READ</span>  ✅ open this Parquet file
+   → PICARRO-004: <span class="nm">SKIP</span>
+   → PICARRO-005: <span class="nm">SKIP</span>
+<span class="cm"># Result: 1 file opened out of 5 — without touching any Parquet</span></code></pre>
+    </div>
+
+    <div class="divider"></div>
+    <h2 class="blue"><span>🪣</span> What Lands on S3</h2>
+    <div class="card">
+      <pre><code>warehouse/pyiceberg_demo/sensor_readings_partitioned/
+├── data/
+│   ├── sensor_id=PICARRO-001/00000-0-<span class="nm">uuid1</span>.parquet  <span class="cm">← ~30 rows</span>
+│   ├── sensor_id=PICARRO-002/00000-0-<span class="nm">uuid2</span>.parquet  <span class="cm">← ~30 rows</span>
+│   ├── sensor_id=PICARRO-003/00000-0-<span class="nm">uuid3</span>.parquet  <span class="cm">← ~30 rows</span>
+│   ├── sensor_id=PICARRO-004/00000-0-<span class="nm">uuid4</span>.parquet  <span class="cm">← ~30 rows</span>
+│   └── sensor_id=PICARRO-005/00000-0-<span class="nm">uuid5</span>.parquet  <span class="cm">← ~30 rows</span>
+└── metadata/
+    ├── 00000-<span class="nm">uuid</span>.metadata.json   <span class="cm">← table created</span>
+    ├── 00001-<span class="nm">uuid</span>.metadata.json   <span class="cm">← after append</span>
+    ├── <span class="nm">uuid</span>-m0.avro             <span class="cm">← 1 manifest · 5 entries</span>
+    └── snap-<span class="nm">snapid</span>-1-<span class="nm">uuid</span>.avro  <span class="cm">← manifest list · 1 snapshot</span>
+<span class="cm">
+Compare to unpartitioned (3 appends): 13 files
+Partitioned (1 append, 5 sensors): 9 files — fewer snapshots, more partition files</span></code></pre>
+    </div>
+
+  </div><!-- /tab t4b -->
+
+
+  <!-- ═══════════════════════════════════════════════ TAB 4c -->
+  <div id="t4c" class="tab-content">
+
+    <h2 class="orange"><span>🔄</span> Overwrite — The Big Picture</h2>
+    <div class="card">
+      <p style="color:var(--muted);margin-bottom:14px;"><code>table.overwrite(df, overwrite_filter=…)</code> replaces rows matching a filter with new data. Unlike a database UPDATE, there is <strong>no in-place mutation</strong>. Old files stay on S3 untouched — only the snapshot changes which files are "current".</p>
+      <div class="callout co-info"><div class="co-icon">💡</div><div class="co-text"><strong>Append vs Overwrite:</strong> Append only adds <code>ADDED</code> entries. Overwrite adds both <code>ADDED</code> (new file) and <code>DELETED</code> (old file) entries in the same manifest — committed atomically.</div></div>
+    </div>
+
+    <div class="divider"></div>
+    <h2 class="orange"><span>🧩</span> Overwrite-Specific Concepts</h2>
+    <div class="card-grid">
+      <div class="comp c-orange">
+        <div class="label">Operation</div><div class="name">overwrite()</div><div class="file">table/__init__.py</div>
+        <p>Takes a replacement DataFrame and an <code>overwrite_filter</code> expression. First scans the current snapshot to find affected files, then writes the replacement, then commits both ADDED and DELETED entries atomically.</p>
+      </div>
+      <div class="comp c-red" style="border-left:3px solid var(--red)">
+        <div class="label">Manifest Status</div><div class="name" style="color:var(--red)">DELETED Entry</div><div class="file">manifest.py</div>
+        <p>An overwrite manifest contains <code>ManifestEntry(status=DELETED)</code> for old files. This entry tells readers "this file existed in an older snapshot but is no longer current." The physical file stays on S3.</p>
+      </div>
+      <div class="comp c-pink">
+        <div class="label">Cleanup</div><div class="name">expire_snapshots()</div><div class="file">table/maintenance.py</div>
+        <p>Old files referenced only by expired snapshots can eventually be deleted using <code>table.expire_snapshots()</code>. Until then, time travel to the old snapshot still works — the original PICARRO-001 rows are still readable.</p>
+      </div>
+      <div class="comp c-blue">
+        <div class="label">Filter Evaluation</div><div class="name">EqualTo("sensor_id", …)</div><div class="file">expressions/</div>
+        <p>The overwrite filter is used in two ways: first to <strong>find which existing files to delete</strong> (manifest scan), then to <strong>filter rows in the new DataFrame</strong> for validation. Only files whose partition value matches are touched.</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <h2 class="orange"><span>⚙️</span> Overwrite Write Path Stages</h2>
+    <div class="stages">
+
+      <div class="stage s1">
+        <div class="stage-num">1</div>
+        <div class="stage-body">
+          <div class="sbadge b-mem">In Memory</div>
+          <h3>Transaction Opens</h3>
+          <p>Same as append — <code>Transaction</code> created, snapshot producer initialized. Schema validated against replacement DataFrame.</p>
+        </div>
+      </div>
+
+      <div class="stage so">
+        <div class="stage-num">★</div>
+        <div class="stage-body">
+          <div class="sbadge b-scan">Extra Step — Scan for Affected Files</div>
+          <h3>Find Files to Delete</h3>
+          <p>This step does <strong>not exist</strong> in a plain append. PyIceberg scans the current snapshot's manifest to find every <code>DataFile</code> whose <code>partition_value</code> matches the <code>overwrite_filter</code>. For <code>EqualTo("sensor_id","PICARRO-001")</code> — only 1 of the 5 partition files is identified.</p>
+          <pre><code><span class="cm"># Manifest scan (metadata-only — no Parquet opened)</span>
+manifest entries checked: 5
+  PICARRO-001 → <span class="nm">MATCH</span> → schedule for DELETED entry
+  PICARRO-002 → skip
+  PICARRO-003 → skip
+  PICARRO-004 → skip
+  PICARRO-005 → skip</code></pre>
+          <div class="callout co-good"><div class="co-icon">⚡</div><div class="co-text"><strong>Partition pruning works here too.</strong> Only the matching partition file is identified — the other 4 Parquet files are never opened.</div></div>
+        </div>
+      </div>
+
+      <div class="stage s3">
+        <div class="stage-num">3</div>
+        <div class="stage-body">
+          <div class="sbadge b-s3">S3 Write #1 — New Parquet File</div>
+          <h3>Write Replacement Data</h3>
+          <p>Identical to Stage 3 of a plain append — the replacement DataFrame (20 PICARRO-001 rows) is written as a new Parquet file. A new <code>DataFile</code> is returned with updated stats (elevated <code>co2_ppm</code> min/max).</p>
+          <pre><code>data/sensor_id=PICARRO-001/00000-0-<span class="nm">uuid-new</span>.parquet
+<span class="cm">← 20 rows, co2_ppm range: 420.0–429.5</span></code></pre>
+        </div>
+      </div>
+
+      <div class="stage so">
+        <div class="stage-num">4</div>
+        <div class="stage-body">
+          <div class="sbadge b-s3">S3 Write #2 — Manifest with ADDED + DELETED</div>
+          <h3>Two-Entry Manifest</h3>
+          <p>The overwrite manifest contains <strong>both</strong> kinds of entries in one Avro file — the new file as <code>ADDED</code> and the old file as <code>DELETED</code>. This is what makes the swap atomic.</p>
+          <pre><code>metadata/<span class="nm">uuid</span>-m0.avro:
+  ManifestEntry(status=<span class="nm">DELETED</span>, data_file=old-PICARRO-001.parquet)
+  ManifestEntry(status=<span class="nm">ADDED</span>,   data_file=new-PICARRO-001.parquet)
+
+<span class="cm"># Other partition files are carried over from the parent snapshot's manifests
+# _FastAppendFiles._existing_manifests() reuses them — no rewrite</span></code></pre>
+        </div>
+      </div>
+
+      <div class="stage s5">
+        <div class="stage-num">5</div>
+        <div class="stage-body">
+          <div class="sbadge b-s3">S3 Write #3 — Manifest List</div>
+          <h3>Snapshot Created</h3>
+          <p>The manifest list (<code>snap-*.avro</code>) points to: the new overwrite manifest (with ADDED+DELETED) + the 4 carried-over manifests from the parent snapshot for PICARRO-002 through PICARRO-005.</p>
+          <pre><code>summary: {
+  operation:          <span class="str">"overwrite"</span>,
+  added-data-files:   <span class="str">"1"</span>,   <span class="cm">← new PICARRO-001 file</span>
+  deleted-data-files: <span class="str">"1"</span>,   <span class="cm">← old PICARRO-001 file</span>
+  added-records:      <span class="str">"20"</span>,
+  deleted-records:    <span class="str">"~30"</span>  <span class="cm">← original row count varied</span>
+}</code></pre>
+        </div>
+      </div>
+
+      <div class="stage s6">
+        <div class="stage-num">6</div>
+        <div class="stage-body">
+          <div class="sbadge b-http">HTTP POST — Atomic Catalog Commit</div>
+          <h3>Same Atomic Gate</h3>
+          <p>Identical to append — <code>AssertRefSnapshotId</code> ensures no other writer modified the table since the scan in Step ★. If the table changed between the scan and the commit, the commit is rejected and you must retry.</p>
+          <div class="callout co-warn"><div class="co-icon">⚠️</div><div class="co-text"><strong>TOCTOU window:</strong> There's a gap between when files-to-delete are identified (★) and when the commit fires (6). If another writer appends PICARRO-001 rows in between, the commit is rejected — the <code>AssertRefSnapshotId</code> catches it.</div></div>
+        </div>
+      </div>
+
+    </div><!-- /stages -->
+
+    <div class="divider"></div>
+    <h2 class="orange"><span>🔁</span> Append vs Overwrite — Side by Side</h2>
+    <div class="card">
+      <table class="compare">
+        <thead><tr><th>Aspect</th><th>Append (4)</th><th>Partitioned Append (4b)</th><th>Overwrite (4c)</th></tr></thead>
+        <tbody>
+          <tr><td class="aspect">Extra pre-step</td><td class="v-append">None</td><td class="v-part">bin_pack by partition</td><td class="v-over">Scan manifest for affected files</td></tr>
+          <tr><td class="aspect">Parquet files written</td><td class="v-append">1 per batch</td><td class="v-part">1 per partition value</td><td class="v-over">1 (replacement)</td></tr>
+          <tr><td class="aspect">Manifest entry types</td><td class="v-append">ADDED only</td><td class="v-part">ADDED only</td><td class="v-over">ADDED + DELETED</td></tr>
+          <tr><td class="aspect">Old files on S3</td><td class="v-append">N/A</td><td class="v-part">N/A</td><td class="v-over">Still there — only dereferenced</td></tr>
+          <tr><td class="aspect">Time travel to before</td><td class="v-append">Yes (parent snapshot)</td><td class="v-part">Yes</td><td class="v-over">Yes — old rows still accessible</td></tr>
+          <tr><td class="aspect">snapshot.operation</td><td class="v-append">"append"</td><td class="v-part">"append"</td><td class="v-over">"overwrite"</td></tr>
+          <tr><td class="aspect">Concurrency control</td><td class="v-append">AssertRefSnapshotId</td><td class="v-part">AssertRefSnapshotId</td><td class="v-over">AssertRefSnapshotId</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="divider"></div>
+    <h2 class="orange"><span>🪣</span> What Lands on S3 After Overwrite</h2>
+    <div class="card">
+      <pre><code>warehouse/pyiceberg_demo/sensor_readings_partitioned/
+├── data/
+│   ├── sensor_id=PICARRO-001/00000-0-<span class="nm">uuid-OLD</span>.parquet  <span class="cm">← still here! (orphan until expiry)</span>
+│   ├── sensor_id=PICARRO-001/00000-0-<span class="nm">uuid-NEW</span>.parquet  <span class="cm">← 20 replacement rows</span>
+│   ├── sensor_id=PICARRO-002/00000-0-<span class="nm">uuid2</span>.parquet     <span class="cm">← untouched</span>
+│   ├── sensor_id=PICARRO-003/00000-0-<span class="nm">uuid3</span>.parquet     <span class="cm">← untouched</span>
+│   ├── sensor_id=PICARRO-004/00000-0-<span class="nm">uuid4</span>.parquet     <span class="cm">← untouched</span>
+│   └── sensor_id=PICARRO-005/00000-0-<span class="nm">uuid5</span>.parquet     <span class="cm">← untouched</span>
+└── metadata/
+    ├── 00000-<span class="nm">uuid</span>.metadata.json   <span class="cm">← table created</span>
+    ├── 00001-<span class="nm">uuid</span>.metadata.json   <span class="cm">← after partitioned append</span>
+    ├── 00002-<span class="nm">uuid</span>.metadata.json   <span class="cm">← after overwrite</span>
+    ├── <span class="nm">uuid-old</span>-m0.avro          <span class="cm">← original manifest (5 ADDED entries)</span>
+    ├── <span class="nm">uuid-new</span>-m0.avro          <span class="cm">← overwrite manifest (1 DELETED + 1 ADDED)</span>
+    ├── snap-<span class="nm">snap1</span>-1-<span class="nm">uuid</span>.avro   <span class="cm">← manifest list · snapshot 1 (append)</span>
+    └── snap-<span class="nm">snap2</span>-1-<span class="nm">uuid</span>.avro   <span class="cm">← manifest list · snapshot 2 (overwrite)</span>
+<span class="cm">
+Run table.expire_snapshots() to clean up uuid-OLD.parquet once snapshot 1 is expired</span></code></pre>
+    </div>
+
+  </div><!-- /tab t4c -->
+
+  <footer>PyIceberg Summit 2026 · Vipin Kataria · Picarro &nbsp;·&nbsp; <a href="https://github.com/apache/iceberg-python" style="color:var(--teal)">apache/iceberg-python</a></footer>
+
+</div>
+
+<script>
+function switchTab(id, btn) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  btn.classList.add('active');
+}
+</script>
+</body>
+</html>
